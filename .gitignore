@@ -1,0 +1,7 @@
+.gitee
+.vscode
+node_modules
+logs
+package-lock.json
+*.js
+*.map
