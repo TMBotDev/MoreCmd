@@ -1,0 +1,6 @@
+{
+    "name": "test",
+    "description": "TMBot测试插件",
+    "version": "0",
+    "main": "app.js"
+}
