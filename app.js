@@ -22,7 +22,12 @@ function main() {
     let files = file_1.FileClass.getFilesList(dir);
     files.forEach((file) => {
         if (file.split(".").pop() == "js") {
-            require(`./commands/${file}`);
+            try {
+                require(`./commands/${file}`);
+            }
+            catch (e) {
+                exports.log.error(`加载 "${file}" 失败: ${(e || "<Null>").toString()}`);
+            }
         }
     });
 }

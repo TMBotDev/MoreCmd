@@ -1,4 +1,4 @@
-import { createWriteStream, fdatasync, statSync } from "fs";
+import { createWriteStream, fstat, statSync } from "fs";
 import { TMBotCmd } from "../../../modules/CmdSystem/CommandSystem";
 import { FileClass } from "../../../tools/file";
 import { MoreCmdConf, log, newCmd } from "../app";
@@ -9,6 +9,7 @@ import path from "path";
 import { ConsoleBar } from "../tools/consoleBar";
 import * as http from "http";
 import * as compressing from "compressing";
+// import * as p from "request-progress";
 
 const format = (data: number) => {
     if (data > 1024 * 1024) {
@@ -34,15 +35,25 @@ const timeFormat = (data: number) => {
 
 let isWorking = false;
 let TmpDir = "./plugins/Data/MoreCmd/Tmp";
+let SearchCache = {
+    "cacheTime": 0,
+    "content": [] as string[]
+}
+
+MoreCmdConf.init("PkgHeaders", {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36 Edg/114.0.1823.67",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
+});
 
 MoreCmdConf.init("PkgRegistry", {
     "TMBot": {
         "gitee": "https://gitee.com/timidine/tmbot-plugin-registry/",
+        "index": "index.txt",
         "branch": "master"
     }
 });
 
-let PkgRegistry: { "gitee": string, "branch": string, "name": string } = MoreCmdConf.get("PkgRegistry")["TMBot"];
+let PkgRegistry: { "gitee": string, "index": string, "branch": string } = MoreCmdConf.get("PkgRegistry")["TMBot"];
 
 function CheckSources(pr: typeof PkgRegistry) {
     if (typeof (pr) != "object" || Array.isArray(PkgRegistry)) {
@@ -51,11 +62,11 @@ function CheckSources(pr: typeof PkgRegistry) {
         throw new Error(`配置项"gitee"配置错误!`);
     } else if (typeof (pr.branch) != "string") {
         throw new Error(`配置项"branch"配置错误!`);
-    } else if (typeof (pr.name) != "string") {
-        throw new Error(`配置项"name"配置错误!`);
+    } else if (typeof (pr.index) != "string") {
+        throw new Error(`配置项"index"配置错误!`);
     }
     if (pr["gitee"].indexOf("https://gitee.com") != 0) {
-        log.warn(`Pkg插件表地址暂时只支持gitee,您填写的地址(${pr.gitee})可能无法使用`);
+        log.warn(`Pkg插件表地址不为gitee,您填写的地址(${pr.gitee})可能无法使用`);
     }
 }
 
@@ -91,6 +102,7 @@ function onInstallExecute(cmd: TMBotCmd.TMBotCommand<any, any, any>, _runner: TM
 
 cmd.overload(InstallParam)(onInstallExecute);
 
+
 let SearchParam: [
     TMBotCmd.CommandParams.Enum,
     TMBotCmd.CommandParams.String
@@ -100,9 +112,18 @@ let SearchParam: [
     ];
 
 async function onSearchExecute(cmd: TMBotCmd.TMBotCommand<any, any, any>, _runner: TMBotCmd.TMBotCommandRunner<any>, out: TMBotCmd.TMBotCommandOutput, params: typeof SearchParam) {
-
-
-
+    let plugins = await SearchPlugin(params[1].value!);
+    let keys = Object.keys(plugins);
+    keys.sort((a, b) => (plugins[a] - plugins[b]));
+    let proms: Promise<any>[] = [];
+    keys.find((v, i) => {
+        console.log(v)
+        AutoRequest(new URL(`${PkgRegistry.gitee}/raw/`))
+        // out.success(`${(i + 1)}.名称: ${v}`);
+        // out.success(`  介绍:${}`)
+        return i == 10 - 1;
+    });
+    await Promise.all(proms);
     cmd.RunningCompleted();
 }
 
@@ -112,31 +133,14 @@ cmd.overload(SearchParam)(onSearchExecute);
 //#region cs
 let sources: string[] = [];
 //就一屎山,能跑就行
-let list: typeof PkgRegistry[] = MoreCmdConf.get("PkgRegistry");
-let RegistrySet: Set<typeof PkgRegistry> = new Set();
+let obj: { [k: string]: typeof PkgRegistry } = MoreCmdConf.get("PkgRegistry");
+let RegistryMap = new Map<string, typeof PkgRegistry>();
 
-function getSetValue<T>(set: Set<T>, fn: (v: T) => boolean) {
-    let iters = set.values();
-    let iter = iters.next();
-    while (!iter.done) {
-        if (fn(iter.value)) {
-            return iter.value;
-        }
-        iter = iters.next();
-    }
-    return undefined;
+for (let key in obj) {
+    let val = obj[key];
+    sources.push(key);
+    RegistryMap.set(key, val);
 }
-
-list.forEach((v) => {
-    try {
-        CheckSources(v);
-    } catch (e) {
-        log.warn(`源: ${JSON.stringify(v)} 异常: ${(e || "<Null>").toString()}`);
-        return;
-    }
-    sources.push(v.name);
-    RegistrySet.add(v);
-});
 
 let ChangeSourcesParam: [
     TMBotCmd.CommandParams.Enum,
@@ -148,13 +152,13 @@ let ChangeSourcesParam: [
 
 
 function onChangeSourcesExecute(cmd: TMBotCmd.TMBotCommand<any, any, any>, _runner: TMBotCmd.TMBotCommandRunner<any>, out: TMBotCmd.TMBotCommandOutput, params: typeof ChangeSourcesParam) {
-    let sources = getSetValue(RegistrySet, (v) => v.name == params[1].value);
+    let sources = RegistryMap.get(params[1].value!);
     if (!sources) {
         out.error(`查找源"${params[1].value}"失败!`);
         return cmd.RunningCompleted();
     }
     PkgRegistry = sources;
-    out.success(`更换TMBot_pkg源为${sources.name}成功!`);
+    out.success(`更换TMBot_pkg源为"${params[1].value}"成功!`);
     cmd.RunningCompleted();
 }
 
@@ -172,17 +176,37 @@ cmd.setup();
 
 
 
-
+// let headers = {
+//     "Accept": "text / html, application/ xhtml + xml, application/xml;q=0.9,image/webp, image / apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+//     "Accept-Encoding": "gzip, deflate, br",
+//     "Accept-Language": "zh,zh-CN;q=0.9",
+//     "Cache-Control": "max-age=0",
+//     "Connection": "keep-alive",
+//     "Host": "gitee.com",
+//     "If-None-Match": "W/\"8d942f67359a2b2103a24ad3fab85380eec87c42\"",
+//     "Sec-Ch-Ua": "\"Not.A/Brand\";v=\"8\", \"Chromium\";v=\"114\", \"Microsoft Edge\";v=\"114\"",
+//     "Sec-Ch-Ua-Mobile": "?0",
+//     "Sec-Ch-Ua-Platform": "\"Windows\"",
+//     "Sec-Fetch-Dest": "document",
+//     "Sec-Fetch-Mode": "navigate",
+//     "Sec-Fetch-Site": "none",
+//     "Sec-Fetch-User": "?1",
+//     "Upgrade-Insecure-Requests": "1",
+//     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36 Edg/114.0.1823.67"
+// }
 
 
 
 function AutoRequest(url: URL, timeout?: number) {
-    return new Promise<http.IncomingMessage | undefined>((ret) => {
+    return new Promise<http.IncomingMessage | undefined>(async (ret) => {
         let args: any[] = [];
         args.push(url);
+        let opts: { [k: string]: any } = {};
+        opts["headers"] = MoreCmdConf.get("PkgHeaders");
         if (!!timeout) {
-            args.push({ "timeout": timeout });
+            opts["timeout"] = timeout;
         }
+        args.push(opts);
         args.push(ret);
         if (url.protocol == "https:") {
             (https as any).get(...args).on("timeout", () => {
@@ -349,16 +373,46 @@ function UnZip(dir: string, toDir: string) {
     });
 }
 
-
+async function SearchPlugin(plugin: string) {
+    let time = Date.now();
+    if ((time - SearchCache.cacheTime) >= 1000 * 60) {//1 min cache
+        // let url = new URL(`${PkgRegistry.gitee}raw/${PkgRegistry.branch}/${PkgRegistry.index}`);
+        let url = new URL(`https://gitee.com/timidine/tmbot-plugin-registry/raw/master/index.txt`);
+        let request = await AutoRequest(url, 1000 * 15);
+        if (!!request) {
+            let content = "";
+            await new Promise<void>((r) => {
+                request!.on("data", (chunk) => {
+                    content += chunk + "";
+                });
+                request!.on("end", r);
+            });
+            if (content.indexOf("TMBotPluginIndex") != 0) {
+                log.warn(`获取索引文件失败!使用缓存...`);
+                log.warn(`信息: ${content}`);
+            } else {
+                let arr = content.replaceAll("\r\n", "\n").replaceAll("\r", "\n").split("\n");
+                arr.shift();
+                SearchCache.content = arr;
+            }
+        } else { log.warn(`获取索引文件失败!使用缓存...`); }
+    }
+    let arr = SearchCache.content;
+    let weight: { [k: string]: number } = {};
+    arr.forEach((v) => {
+        let index = v.indexOf(plugin);
+        if (index == -1) { return; }
+        weight[v] = index;
+    });
+    return weight;
+}
 
 GlobalEvent.onTMBotInitd.on(async () => {
+    // let a = await got.get(new URL("https://software.download.prss.microsoft.com/dbazure/Win10_22H2_Chinese_Simplified_x64v1.iso?t=7fc64478-2b22-4c44-aaa4-42203eece20d&e=1688631677&h=3cf633a3368cea936603d52d75b7efd7c55fba0cde9d9966721ba0bd2ce2d1a0"));
+    // console.log(a)
     // await DownloadZip(new URL("https://software.download.prss.microsoft.com/dbazure/Win10_22H2_Chinese_Simplified_x64v1.iso?t=7fc64478-2b22-4c44-aaa4-42203eece20d&e=1688631677&h=3cf633a3368cea936603d52d75b7efd7c55fba0cde9d9966721ba0bd2ce2d1a0"), true);
     // await DownloadZip(new URL(`https://gitee.com/timidine/mcbe-lite-loader-script-engine-tmessential/raw/main/TMET%E6%96%B0%E7%89%88%E6%9C%AC%E6%8F%92%E4%BB%B6api%E8%B0%83%E7%94%A8%E5%AE%9E%E4%BE%8B%E5%92%8C%E5%BC%80%E5%8F%91%E4%BE%9D%E8%B5%96%E5%8C%85.zip`), true);
     // await UnZip(`./plugins/Data/MoreCmd/Tmp/aaaa.zip`, "./a");
 
     // console.log("success");
-
-    let a = await AutoRequest(new URL("https://raw.githubusercontent.com/TMBotDev/PluginRegistry/main/index.json"), 1000);
-    console.log(typeof a);
 });
-
