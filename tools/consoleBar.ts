@@ -29,6 +29,7 @@ export class ConsoleBar {
     private inQuestion = false;
     private isFirstQuestion = false;
     private isCancel = false;
+    private isInitd = false;
     constructor() {
         if (hasBar) {
             throw new Error(`已有进度条被创建!无法同时存在两个进度条!`);
@@ -94,6 +95,11 @@ export class ConsoleBar {
         this.description = s;
     }
     tick(op: OperationType = OperationType.Auto) {
+        if (!this.isInitd) {
+            // console.log("")
+            stdout.write("\n");
+            this.isInitd = true;
+        }
         let NotCur = true;
         if (op == OperationType.Clear) {
             this.CursorTo0(true);
@@ -151,6 +157,7 @@ export class ConsoleBar {
         if (this.inQuestion) { return false; }
         stdout.write = this.oriStdout;
         this.CursorTo0(true);
+        // stdout.moveCursor(0, -1);//移动输出指针到上一行（不稳定）
         hasBar = false;
     }
 }

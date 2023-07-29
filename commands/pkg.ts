@@ -83,21 +83,15 @@ let InstallParam: [
 
 function onInstallExecute(cmd: TMBotCmd.TMBotCommand<any, any, any>, _runner: TMBotCmd.TMBotCommandRunner<any>, out: TMBotCmd.TMBotCommandOutput, params: typeof InstallParam) {
     (async () => {
-        let file = params[0].value!;
-        if (["https://", "http://"].find((v) => {
-            return file.indexOf(v) == 0;
-        }) != undefined) {//web
-            await DownloadZip(new URL(file), (typeof (LL) != "undefined"));
-        } else {
-            let stand = FileClass.getStandardPath(file);
-            if (!stand) { return out.error(`获取插件标准目录失败!`); }
-            let dir = statSync(stand, { "throwIfNoEntry": false });
-            if (!dir || dir.isDirectory()) {
-                return out.error(`所输入的目录不为压缩包!`);
-            }
-
-        }
-    })().then(() => cmd.RunningCompleted());
+        let name = params[1].value!;
+        log.info(`[PKG] 尝试安装${name}...`);
+        let info = JSON.parse(await getPluginInfo(name));
+        log.info(`[PKG] 插件名: ${info["name"]}`);
+        log.info(`[PKG] 插件介绍: ${info["description"]}`);
+    })().then(() => cmd.RunningCompleted()).catch((e: Error) => {
+        log.error(`[PKG] 下载失败!原因: ${e.message}`);
+        cmd.RunningCompleted();
+    });
 }
 
 cmd.overload(InstallParam)(onInstallExecute);
@@ -112,18 +106,52 @@ let SearchParam: [
     ];
 
 async function onSearchExecute(cmd: TMBotCmd.TMBotCommand<any, any, any>, _runner: TMBotCmd.TMBotCommandRunner<any>, out: TMBotCmd.TMBotCommandOutput, params: typeof SearchParam) {
+    out.success(`正在搜索中...`);
     let plugins = await SearchPlugin(params[1].value!);
     let keys = Object.keys(plugins);
     keys.sort((a, b) => (plugins[a] - plugins[b]));
-    let proms: Promise<any>[] = [];
+    let proms: Promise<string>[] = [];
+    let nameList: string[] = [];
     keys.find((v, i) => {
-        console.log(v)
-        AutoRequest(new URL(`${PkgRegistry.gitee}/raw/`))
+        let r = AutoRequest(new URL(`${PkgRegistry.gitee}raw/${PkgRegistry.branch}/plugins/${v}`));
+        // proms.push(r);
+        nameList.push(v);
+
+        proms.push(new Promise<string>(async (ret) => {
+            let res = await r;
+            if (!res) { return ret("&&&");/*error*/ }
+            let str = "";
+            res.on("data", (chunk) => {
+                str += chunk.toString();
+            });
+            res.on("close", () => {
+                ret(str);
+            });
+        }));
+
+
         // out.success(`${(i + 1)}.名称: ${v}`);
         // out.success(`  介绍:${}`)
         return i == 10 - 1;
     });
-    await Promise.all(proms);
+    let data = await Promise.all(proms);
+    data.forEach((v, i) => {
+        let tmp = nameList[i].split(".");
+        tmp.pop();
+        let name = tmp.join(".");
+        try {
+            let obj = JSON.parse(v);
+            out.success(`${(i + 1)}.名称: ${name}`);
+            out.success(`  介绍:${obj["description"] || "无"}`);
+        } catch (_) {
+            log.warn(`${i + 1}.获取"${name}"插件信息失败!`);
+        }
+    });
+    if (data.length != 0) {
+        out.success(`§e使用"pkg i 插件名"可以直接安装插件`);
+    } else {
+        out.error(`未搜索到指定插件`);
+    }
     cmd.RunningCompleted();
 }
 
@@ -223,7 +251,7 @@ function AutoRequest(url: URL, timeout?: number) {
 
 
 //屎山
-function DownloadZip(web: URL, bar: boolean) {
+function DownloadZip(web: URL, name: string, bar: boolean) {
     // console.log(web.toString())
     let count = 0;
     let sid: NodeJS.Timer | number;
@@ -237,7 +265,7 @@ function DownloadZip(web: URL, bar: boolean) {
         if (!FileClass.exists(TmpDir)) {
             FileClass.mkdir(TmpDir);
         }
-        let path_ = path.join(TmpDir, "tmpZip.zip");
+        let path_ = path.join(TmpDir, name);
         if (FileClass.exists(path_)) {
             FileClass.writeTo(path_, "");
         }
@@ -376,8 +404,8 @@ function UnZip(dir: string, toDir: string) {
 async function SearchPlugin(plugin: string) {
     let time = Date.now();
     if ((time - SearchCache.cacheTime) >= 1000 * 60) {//1 min cache
-        // let url = new URL(`${PkgRegistry.gitee}raw/${PkgRegistry.branch}/${PkgRegistry.index}`);
-        let url = new URL(`https://gitee.com/timidine/tmbot-plugin-registry/raw/master/index.txt`);
+        let url = new URL(`${PkgRegistry.gitee}raw/${PkgRegistry.branch}/${PkgRegistry.index}`);
+        // let url = new URL(`https://gitee.com/timidine/tmbot-plugin-registry/raw/master/index.txt`);
         let request = await AutoRequest(url, 1000 * 15);
         if (!!request) {
             let content = "";
@@ -407,12 +435,41 @@ async function SearchPlugin(plugin: string) {
     return weight;
 }
 
+/**
+ * 获取插件信息
+ * @returns 可能失败,自行捕获parse错误
+ * ``` js
+ * {
+ *     "name": string,
+ *     "description": string,
+ *     "source": string
+ * }
+ * ```
+ */
+function getPluginInfo(name: string) {
+    let str = `${PkgRegistry.gitee}raw/${PkgRegistry.branch}/plugins/${name}`;
+    if (name.split(".").pop() != "json") {
+        str += ".json";
+    }
+    return new Promise<string>(async (re) => {
+        let res = await AutoRequest(new URL(str));
+        if (!res) {
+            // log.warn(`获取"${v}"插件信息失败`);
+            re("???");
+            return;
+        }
+        let res1 = "";
+        res.on("data", (chunk) => {
+            res1 += chunk.toString();
+        });
+        res.on("end", () => { re(res1); });
+    });
+}
+
 GlobalEvent.onTMBotInitd.on(async () => {
-    // let a = await got.get(new URL("https://software.download.prss.microsoft.com/dbazure/Win10_22H2_Chinese_Simplified_x64v1.iso?t=7fc64478-2b22-4c44-aaa4-42203eece20d&e=1688631677&h=3cf633a3368cea936603d52d75b7efd7c55fba0cde9d9966721ba0bd2ce2d1a0"));
-    // console.log(a)
-    // await DownloadZip(new URL("https://software.download.prss.microsoft.com/dbazure/Win10_22H2_Chinese_Simplified_x64v1.iso?t=7fc64478-2b22-4c44-aaa4-42203eece20d&e=1688631677&h=3cf633a3368cea936603d52d75b7efd7c55fba0cde9d9966721ba0bd2ce2d1a0"), true);
-    // await DownloadZip(new URL(`https://gitee.com/timidine/mcbe-lite-loader-script-engine-tmessential/raw/main/TMET%E6%96%B0%E7%89%88%E6%9C%AC%E6%8F%92%E4%BB%B6api%E8%B0%83%E7%94%A8%E5%AE%9E%E4%BE%8B%E5%92%8C%E5%BC%80%E5%8F%91%E4%BE%9D%E8%B5%96%E5%8C%85.zip`), true);
+    // await DownloadZip(new URL("https://software.download.prss.microsoft.com/dbazure/Win10_22H2_Chinese_Simplified_x64v1.iso?t=9bc791af-98e1-4da3-828d-f6a6829ad2a6&e=1690720914&h=7ecaa253228fb7761c863d62001f6e6db13e06f4ea941740c84c739327daec0a"), "tmpZip.zip", true);
+    await DownloadZip(new URL(`https://gitee.com/timidine/mcbe-lite-loader-script-engine-tmessential/raw/main/TMET%E6%96%B0%E7%89%88%E6%9C%AC%E6%8F%92%E4%BB%B6api%E8%B0%83%E7%94%A8%E5%AE%9E%E4%BE%8B%E5%92%8C%E5%BC%80%E5%8F%91%E4%BE%9D%E8%B5%96%E5%8C%85.zip`), "tmpZip.zip", true);
     // await UnZip(`./plugins/Data/MoreCmd/Tmp/aaaa.zip`, "./a");
 
-    // console.log("success");
+    console.log("success");
 });
