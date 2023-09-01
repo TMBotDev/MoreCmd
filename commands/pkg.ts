@@ -9,6 +9,7 @@ import path from "path";
 import { ConsoleBar } from "../tools/consoleBar";
 import * as http from "http";
 import * as compressing from "compressing";
+import { PLUGIN_DIR, PluginPackage } from "../../../modules/PluginLoader";
 // import * as p from "request-progress";
 
 const format = (data: number) => {
@@ -75,21 +76,37 @@ CheckSources(PkgRegistry);
 let cmd = newCmd("pkg", "安装插件(支持网络安装和本地安装)[本地安装请输入压缩包路径]");
 let InstallParam: [
     TMBotCmd.CommandParams.Enum,
-    TMBotCmd.CommandParams.String
+    TMBotCmd.CommandParams.String,
+    TMBotCmd.CommandParams.Bool
 ] = [
         new TMBotCmd.CommandParams.Enum("install", ["install", "i"]),
-        new TMBotCmd.CommandParams.String("zip")
+        new TMBotCmd.CommandParams.String("name"),
+        new TMBotCmd.CommandParams.Bool("notTip").setNotMandatory()
     ];
 
 function onInstallExecute(cmd: TMBotCmd.TMBotCommand<any, any, any>, _runner: TMBotCmd.TMBotCommandRunner<any>, out: TMBotCmd.TMBotCommandOutput, params: typeof InstallParam) {
     (async () => {
         let name = params[1].value!;
-        log.info(`[PKG] 尝试安装${name}...`);
+        log.info(`[PKG] 尝试安装插件: ${name}...`);
         let info = JSON.parse(await getPluginInfo(name));
         log.info(`[PKG] 插件名: ${info["name"]}`);
         log.info(`[PKG] 插件介绍: ${info["description"]}`);
+        let Tip = !params[2].value;
+        let zipName = info["name"] + ".zip";
+        log.info(`[PKG] 开始下载插件...`);
+        console.log(info["source"])
+        let downloadEd = await DownloadZip(info["source"], zipName, true, Tip);
+        if (!downloadEd) { throw new Error(`下载文件失败!`); }
+        let zipPath = FileClass.getStandardPath(path.join(TmpDir, zipName))!;
+        let pluginDir = FileClass.getStandardPath(path.join(PLUGIN_DIR, info["name"]))!;
+
+        let UnZipEd = await UnZip(zipPath, pluginDir);
+        if (!UnZipEd) { throw new Error(`解压文件"${zipPath}"失败!`); }
+        await AutoFixPluginDir(pluginDir);
+        log.info(`下载成功!开始加载...`);
+        PluginPackage.loadPlugin(pluginDir);
     })().then(() => cmd.RunningCompleted()).catch((e: Error) => {
-        log.error(`[PKG] 下载失败!原因: ${e.message}`);
+        log.error(`[PKG] 安装失败!原因: ${e.message}`);
         cmd.RunningCompleted();
     });
 }
@@ -236,7 +253,7 @@ function AutoRequest(url: URL, timeout?: number) {
         }
         args.push(opts);
         args.push(ret);
-        if (url.protocol == "https:") {
+        if (url.toString().indexOf("https:") == 0) {
             (https as any).get(...args).on("timeout", () => {
                 ret(undefined);
             });
@@ -251,7 +268,8 @@ function AutoRequest(url: URL, timeout?: number) {
 
 
 //屎山
-function DownloadZip(web: URL, name: string, bar: boolean) {
+function DownloadZip(web: URL, name: string, bar: boolean, tip: boolean) {
+    let cb: ConsoleBar;
     // console.log(web.toString())
     let count = 0;
     let sid: NodeJS.Timer | number;
@@ -259,6 +277,7 @@ function DownloadZip(web: URL, name: string, bar: boolean) {
         if (sid == null) {
             sid = setTimeout(() => {
                 log.error(`[PKG] 下载超时!`);
+                if (!!cb) { cb.close(); }
                 res(false);
             }, 15 * 1000);
         }
@@ -270,7 +289,6 @@ function DownloadZip(web: URL, name: string, bar: boolean) {
             FileClass.writeTo(path_, "");
         }
         let stream = createWriteStream(path_);
-        let cb: ConsoleBar;
         if (bar) {
             try {
                 cb = new ConsoleBar();
@@ -298,18 +316,20 @@ function DownloadZip(web: URL, name: string, bar: boolean) {
                 cb.setDescription(`[PKG] 准备下载文件,大小: ${sizeStr}`);
                 cb.tick(cb.OperationType.Auto);
                 // setTimeout(() => { cb.cancelQuestion() }, 2000);
-                try {
-                    let promise = cb.question("请问是否继续?(y/n)");
-                    if (!promise) { throw ""; }
-                    let str = await promise;
-                    if (str.toLowerCase() != "y") {
-                        log.warn(`[PKG] 取消操作...`);
-                        throw ``;
+                if (tip) {
+                    try {
+                        let promise = cb.question("请问是否继续?(y/n)");
+                        if (!promise) { throw ""; }
+                        let str = await promise;
+                        if (str.toLowerCase() != "y") {
+                            log.warn(`[PKG] 取消操作...`);
+                            throw ``;
+                        }
+                    } catch (_) {
+                        cb.close();
+                        res(false);
+                        return;
                     }
-                } catch (_) {
-                    cb.close();
-                    res(false);
-                    return;
                 }
             }
             let now = 0;
@@ -374,6 +394,7 @@ function UnZip(dir: string, toDir: string) {
             return;
         }
         let stat1 = statSync(stand, { "throwIfNoEntry": false });
+        FileClass.mkdir(toStand);
         let stat2 = statSync(toStand, { "throwIfNoEntry": false })
         if (!stat1 || !stat1.isFile()) {
             log.error(`[PKG] 所选文件必须使用zip格式!`);
@@ -428,7 +449,7 @@ async function SearchPlugin(plugin: string) {
     let arr = SearchCache.content;
     let weight: { [k: string]: number } = {};
     arr.forEach((v) => {
-        let index = v.indexOf(plugin);
+        let index = v.toLowerCase().indexOf(plugin.toLowerCase());
         if (index == -1) { return; }
         weight[v] = index;
     });
@@ -466,10 +487,35 @@ function getPluginInfo(name: string) {
     });
 }
 
-GlobalEvent.onTMBotInitd.on(async () => {
+let Fixing = false;
+
+async function AutoFixPluginDir(dir: string) {
+    if (Fixing) {
+        await (new Promise<void>((r) => {
+            let sid = setInterval(() => {
+                if (!Fixing) {
+                    clearInterval(sid);
+                    r();
+                }
+            }, 50);
+        }));
+    }
+    // await (new Promise<void>((r) => { setTimeout(r, 5000); }));
+    let fileList = FileClass.getFilesList(dir);
+    if (fileList.length == 1) {
+        log.warn(`[PKG] 检测到插件目录异常,正在修复...`);
+        let fileDir = path.join(dir, fileList[0]);
+        let id = Math.random() + "";
+        FileClass.move(fileDir, path.join(path.dirname(dir), "tmp" + id));
+        FileClass.delete(dir);
+        FileClass.rename(`./plugins/tmp${id}`, dir);
+        log.info(`[PKG] 修复完成!`);
+    }
+}
+
+// GlobalEvent.onTMBotInitd.on(async () => {
     // await DownloadZip(new URL("https://software.download.prss.microsoft.com/dbazure/Win10_22H2_Chinese_Simplified_x64v1.iso?t=9bc791af-98e1-4da3-828d-f6a6829ad2a6&e=1690720914&h=7ecaa253228fb7761c863d62001f6e6db13e06f4ea941740c84c739327daec0a"), "tmpZip.zip", true);
-    await DownloadZip(new URL(`https://gitee.com/timidine/mcbe-lite-loader-script-engine-tmessential/raw/main/TMET%E6%96%B0%E7%89%88%E6%9C%AC%E6%8F%92%E4%BB%B6api%E8%B0%83%E7%94%A8%E5%AE%9E%E4%BE%8B%E5%92%8C%E5%BC%80%E5%8F%91%E4%BE%9D%E8%B5%96%E5%8C%85.zip`), "tmpZip.zip", true);
+    // await DownloadZip(new URL(`https://gitee.com/timidine/mcbe-lite-loader-script-engine-tmessential/raw/main/TMET%E6%96%B0%E7%89%88%E6%9C%AC%E6%8F%92%E4%BB%B6api%E8%B0%83%E7%94%A8%E5%AE%9E%E4%BE%8B%E5%92%8C%E5%BC%80%E5%8F%91%E4%BE%9D%E8%B5%96%E5%8C%85.zip`), "tmpZip.zip", true);
     // await UnZip(`./plugins/Data/MoreCmd/Tmp/aaaa.zip`, "./a");
 
-    console.log("success");
-});
+// });
